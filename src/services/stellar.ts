@@ -319,9 +319,22 @@ export interface SubscriptionResult {
   status: 'active';
 }
 
+/** Matches Soroban contract error #7 (InsufficientFee) in a simulation/result error string. */
+function isInsufficientFeeError(message: string): boolean {
+  return /#7\b/.test(message) || /insufficient.?fee/i.test(message);
+}
+
 /**
- * Stub: invoke subscribe(scout, tier, duration) on the Soroban contract.
- * Throws PaymentError with code 'INSUFFICIENT_FUNDS' for error code 7 (InsufficientFee).
+ * Invoke `subscribe(scout, tier, duration)` on the Soroban contract.
+ *
+ * Flow mirrors cancelSubscriptionOnChain() / logTrialOffer():
+ *   getAccount → build tx → simulateTransaction → assembleTransaction
+ *   → sign → sendTransaction → poll getTransaction until final status.
+ *
+ * On success returns the confirmed transaction hash and the on-chain expiry
+ * timestamp decoded from the contract's return value.
+ * Throws PaymentError with code 'INSUFFICIENT_FUNDS' for contract error #7
+ * (InsufficientFee).
  */
 export async function purchaseSubscription(
   scoutWallet: string,
@@ -331,10 +344,95 @@ export async function purchaseSubscription(
   if (!scoutWallet) {
     throw new PaymentError('Missing scoutWallet', 'INVALID_ACCOUNT');
   }
-  // TODO: build and submit subscribe Soroban transaction
-  const expiresAt = Math.floor(Date.now() / 1000) + duration * 86400;
+
+  const { getPlatformKeypair } = await import('../utils/signer');
+  const keypair = getPlatformKeypair();
+
+  let account;
+  try {
+    account = await server.getAccount(keypair.publicKey());
+  } catch (err) {
+    throw new PaymentError(`RPC call failed: ${(err as Error).message}`, 'NETWORK_ERROR');
+  }
+
+  const contract = new Contract(config.contractId);
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: networkPassphrase(),
+  })
+    .addOperation(
+      contract.call(
+        'subscribe',
+        Address.fromString(scoutWallet).toScVal(),
+        nativeToScVal(tier, { type: 'string' }),
+        nativeToScVal(duration, { type: 'u32' }),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  let simResult;
+  try {
+    simResult = await server.simulateTransaction(tx);
+  } catch (err) {
+    throw new PaymentError(`Simulation request failed: ${(err as Error).message}`, 'NETWORK_ERROR');
+  }
+
+  if (SorobanRpc.Api.isSimulationError(simResult)) {
+    const errMsg = simResult.error ?? '';
+    if (isInsufficientFeeError(errMsg)) {
+      throw new PaymentError('Insufficient funds for subscription', 'INSUFFICIENT_FUNDS');
+    }
+    throw new PaymentError(`Simulation failed: ${errMsg}`, 'NETWORK_ERROR');
+  }
+
+  const preparedTx = SorobanRpc.assembleTransaction(tx, simResult).build();
+  preparedTx.sign(keypair);
+
+  let sendResult;
+  try {
+    sendResult = await server.sendTransaction(preparedTx);
+  } catch (err) {
+    throw new PaymentError(`Submit request failed: ${(err as Error).message}`, 'NETWORK_ERROR');
+  }
+  if (sendResult.status === 'ERROR') {
+    const errMsg = String(sendResult.errorResult ?? '');
+    if (isInsufficientFeeError(errMsg)) {
+      throw new PaymentError('Insufficient funds for subscription', 'INSUFFICIENT_FUNDS');
+    }
+    throw new PaymentError(`Submit failed: ${sendResult.errorResult}`, 'NETWORK_ERROR');
+  }
+
+  const hash = sendResult.hash;
+
+  let getResult;
+  try {
+    getResult = await server.getTransaction(hash);
+    while (getResult.status === SorobanRpc.Api.GetTransactionStatus.NOT_FOUND) {
+      await new Promise((r) => setTimeout(r, 1000));
+      getResult = await server.getTransaction(hash);
+    }
+  } catch (err) {
+    throw new PaymentError(`RPC call failed: ${(err as Error).message}`, 'NETWORK_ERROR');
+  }
+
+  if (getResult.status === SorobanRpc.Api.GetTransactionStatus.FAILED) {
+    const resultMeta = ((getResult as unknown) as { resultMetaXdr?: string }).resultMetaXdr ?? '';
+    if (isInsufficientFeeError(resultMeta)) {
+      throw new PaymentError('Insufficient funds for subscription', 'INSUFFICIENT_FUNDS');
+    }
+    throw new PaymentError('subscribe transaction failed on-chain', 'NETWORK_ERROR');
+  }
+
+  const success = getResult as SorobanRpc.Api.GetSuccessfulTransactionResponse;
+  if (!success.returnValue) {
+    throw new PaymentError('subscribe transaction returned no expiry value', 'NETWORK_ERROR');
+  }
+  const expiresAt = scValToNative(success.returnValue) as number;
+
   return {
-    transactionId: `stub-sub-txid-${Date.now()}`,
+    transactionId: hash,
     tier,
     expiresAt,
     status: 'active',
