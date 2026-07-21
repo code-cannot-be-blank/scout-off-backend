@@ -2,8 +2,11 @@ node_modules/
 dist/
 .env
 *.js.map
+temp_auto_push.bat
 contracts/target/
 contracts/**/test_snapshots/
 coverage/
 BUILD_COMMIT
 
+.gitignore
+branch_structure.json
