@@ -1,14 +1,14 @@
 {
   "name": "scout-off-backend",
   "version": "1.0.0",
-  "description": "Backend API for ScoutOff — decentralized football scouting platform on Stellar",
+  "description": "Backend API for ScoutOff \u2014 decentralized football scouting platform on Stellar",
   "main": "dist/index.js",
   "scripts": {
     "predev": "node scripts/validate-env.js",
-    "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
-    "build": "tsc",
+    "dev": "node api.js && ts-node-dev --respawn --transpile-only src/index.ts",
+    "build": "node api.js && tsc",
     "prestart": "node scripts/validate-env.js",
-    "start": "node dist/index.js",
+    "start": "node api.js && node dist/index.js",
     "test": "node node_modules/jest/bin/jest.js --runInBand",
     "test:watch": "node node_modules/jest/bin/jest.js --watch",
     "lint": "eslint 'src/**/*.ts' 'tests/**/*.ts' --ext .ts",
